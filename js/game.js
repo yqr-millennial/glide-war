@@ -22,6 +22,7 @@ const player = {
 
 // Entity pools
 let bullets = [];
+let bossBullets = [];
 let enemies = [];
 let particles = [];
 let powerups = [];
@@ -43,7 +44,7 @@ let iceFreezeTimer = 0;
 let extraLives = 0;
 
 // Special abilities
-let abilityShieldCooldown = 0;   // 20s cooldown for Protective Shield (key 1)
+let abilityShieldCooldown = 0;   // 30s cooldown for Protective Shield (key 1)
 let abilitySmashCooldown = 0;    // 30s cooldown for Smash Everything (key 2)
 let abilityShieldActive = false; // true when shield was activated via ability (enhanced visual)
 
@@ -595,9 +596,9 @@ function collectPowerup(type) {
 // === Special Abilities ===
 function activateProtectiveShield() {
     if (abilityShieldCooldown > 0 || !running || gameOver) return;
-    shieldTimer = 10000;
+    shieldTimer = 5000;
     abilityShieldActive = true;
-    abilityShieldCooldown = 20000;
+    abilityShieldCooldown = 30000;
     // Visual burst
     for (let i = 0; i < 12; i++) {
         const a = (Math.PI * 2 * i) / 12;
@@ -632,7 +633,7 @@ function activateSmashEverything() {
         spawnExplosion(bx, by, '#ffd700', 15, 5);
         for (let d = 0; d < 3; d++) spawnDebris(bx, by);
         score += 500 * Math.floor(difficultyLevel / 3);
-        boss = null; bossSpawnedThisLevel = true;
+        boss = null; bossSpawnedThisLevel = true; bossBullets = [];
     }
     triggerShake(12, 400);
     playBossExplosionSound();
@@ -651,43 +652,162 @@ function spawnEnemy() {
 }
 
 // === Boss system ===
+// Boss type 0: Gunship    — shoots aimed bullets at player
+// Boss type 1: Destroyer  — shoots 3-way spread
+// Boss type 2: Dreadnought— shoots 5-way fan + aimed
+// Boss type 3: Mothership — summons enemies + shoots spreads
+const BOSS_TYPES = [
+    { name: 'GUNSHIP',     w: 72, h: 54, speed: 2.2, hpMul: 1.0, fireInterval: 1400, bodyColor: '#ff3333', accentColor: '#cc0000', cockpitColor: '#ff8888' },
+    { name: 'DESTROYER',   w: 90, h: 66, speed: 1.6, hpMul: 1.6, fireInterval: 1800, bodyColor: '#ff6600', accentColor: '#cc4400', cockpitColor: '#ffaa44' },
+    { name: 'DREADNOUGHT', w: 106, h: 78, speed: 1.2, hpMul: 2.4, fireInterval: 2200, bodyColor: '#cc22cc', accentColor: '#881188', cockpitColor: '#ee88ee' },
+    { name: 'MOTHERSHIP',  w: 120, h: 88, speed: 1.0, hpMul: 3.5, fireInterval: 2800, bodyColor: '#ff2244', accentColor: '#990022', cockpitColor: '#ff6688' }
+];
+
+function bossTypeInfo() {
+    const cycle = Math.floor(difficultyLevel / 3); // 1,2,3,4...
+    return BOSS_TYPES[(cycle - 1) % BOSS_TYPES.length];
+}
+
 function spawnBoss() {
-    const bl = Math.floor(difficultyLevel / 3);
-    boss = { x: CANVAS_W / 2 - 40, y: -60, width: 80, height: 60, speed: 2.0, hp: 15 + bl * 8, hpMax: 15 + bl * 8, spawnTime: performance.now(), phase: 0 };
+    const info = bossTypeInfo();
+    const hpBase = 40 + Math.floor(difficultyLevel / 3) * 25;
+    const hp = Math.floor(hpBase * info.hpMul);
+    boss = {
+        x: CANVAS_W / 2 - info.w / 2, y: -info.h,
+        width: info.w, height: info.h,
+        speed: info.speed,
+        hp: hp, hpMax: hp,
+        spawnTime: performance.now(), phase: 0,
+        bossType: (Math.floor(difficultyLevel / 3) - 1) % BOSS_TYPES.length,
+        lastFire: performance.now(),
+        movePhaseX: Math.random() * Math.PI * 2,
+        movePhaseY: Math.random() * Math.PI * 2,
+        entryDone: false
+    };
     bossSpawnedThisLevel = true; bossWarningTimer = 0; bossWarningText = '';
-    // Thin out existing enemies for a cleaner boss fight — keep at most 3
-    while (enemies.length > 3) enemies.splice(Math.floor(Math.random() * enemies.length), 1);
+    // Thin out existing enemies for a cleaner boss fight — keep at most 2
+    while (enemies.length > 2) enemies.splice(Math.floor(Math.random() * enemies.length), 1);
     playBossWarningSound();
 }
-function updateBoss(dt) {
+
+function updateBoss(dt, timestamp) {
     if (!boss) return;
-    boss.y += boss.speed * dt;
-    boss.x = CANVAS_W / 2 - 40 + Math.sin(boss.y * 0.02) * 150;
-    boss.x = Math.max(0, Math.min(CANVAS_W - 80, boss.x));
-    if (boss.y > 160) {
-        boss.y = 160;
-        boss.x = CANVAS_W / 2 - 40 + Math.sin(performance.now() * 0.001) * 180;
-        boss.x = Math.max(0, Math.min(CANVAS_W - 80, boss.x));
+    const info = BOSS_TYPES[boss.bossType];
+
+    // Smooth phase-based movement
+    boss.movePhaseX += dt * 0.0008;
+    boss.movePhaseY += dt * 0.0005;
+
+    // Entry: glide down to patrol position
+    if (!boss.entryDone) {
+        const targetY = 140;
+        if (boss.y < targetY) {
+            boss.y += boss.speed * dt;
+        }
+        if (boss.y >= targetY) {
+            boss.y = targetY;
+            boss.entryDone = true;
+        }
+        // Gentle horizontal drift during entry
+        boss.x += Math.sin(boss.movePhaseX * 2) * 0.8 * dt;
+    } else {
+        // Patrol: smooth sine-based cruising
+        boss.x = CANVAS_W / 2 - boss.width / 2 + Math.sin(boss.movePhaseX) * (CANVAS_W * 0.38);
+        boss.y = 140 + Math.sin(boss.movePhaseY) * 35;
+    }
+    boss.x = Math.max(5, Math.min(CANVAS_W - boss.width - 5, boss.x));
+
+    // Fire boss bullets
+    if (timestamp - boss.lastFire >= info.fireInterval) {
+        boss.lastFire = timestamp;
+        const bcx = boss.x + boss.width / 2;
+        const bcy = boss.y + boss.height / 2;
+        const aimX = player.x + player.width / 2;
+        const aimY = player.y + player.height / 2;
+        const angle = Math.atan2(aimY - bcy, aimX - bcx);
+        const bspd = 3.0;
+
+        switch (boss.bossType) {
+            case 0: // Gunship: single aimed shot
+                bossBullets.push({ x: bcx, y: bcy + 10, vx: Math.cos(angle) * bspd, vy: Math.sin(angle) * bspd, size: 10, color: '#ff4444' });
+                break;
+            case 1: // Destroyer: 3-way spread
+                for (let a = -0.25; a <= 0.25; a += 0.25) {
+                    const aa = angle + a;
+                    bossBullets.push({ x: bcx, y: bcy + 10, vx: Math.cos(aa) * bspd, vy: Math.sin(aa) * bspd, size: 9, color: '#ff8800' });
+                }
+                break;
+            case 2: // Dreadnought: 5-way fan
+                for (let a = -0.4; a <= 0.4; a += 0.2) {
+                    const aa = angle + a;
+                    bossBullets.push({ x: bcx, y: bcy + 10, vx: Math.cos(aa) * bspd, vy: Math.sin(aa) * bspd, size: 10, color: '#dd44dd' });
+                }
+                break;
+            case 3: // Mothership: 3-way spread + summon 1 enemy
+                for (let a = -0.3; a <= 0.3; a += 0.3) {
+                    const aa = angle + a;
+                    bossBullets.push({ x: bcx, y: bcy + 10, vx: Math.cos(aa) * (bspd + 0.5), vy: Math.sin(aa) * (bspd + 0.5), size: 12, color: '#ff4466' });
+                }
+                // Summon a minion from the side
+                if (enemies.length < 5) {
+                    const type = Math.random() < 0.5 ? 0 : 1;
+                    const size = enemySize(type);
+                    const sx = Math.random() < 0.5 ? 0 : CANVAS_W - size.w;
+                    enemies.push({ x: sx, y: boss.y + 30, width: size.w, height: size.h, speed: enemySpeed * 0.7, type, hp: enemyHPMax(type), hpMax: enemyHPMax(type), spawnX: sx, spawnTime: timestamp });
+                }
+                break;
+        }
     }
 }
+
 function drawBoss() {
     if (!boss) return;
-    ctx.save(); ctx.translate(boss.x + boss.width / 2, boss.y + boss.height / 2);
-    ctx.fillStyle = '#ff2222'; ctx.beginPath();
-    ctx.moveTo(0, 30); ctx.lineTo(-32, -20); ctx.lineTo(-10, -15); ctx.lineTo(10, -15); ctx.lineTo(32, -20); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#cc0000'; ctx.beginPath();
-    ctx.moveTo(-24, -8); ctx.lineTo(-40, 10); ctx.lineTo(-20, 6); ctx.closePath(); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(24, -8); ctx.lineTo(40, 10); ctx.lineTo(20, 6); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#ff8888'; ctx.beginPath(); ctx.arc(0, 8, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(-10, 0, 5, 0, Math.PI * 2); ctx.arc(10, 0, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#000000'; ctx.beginPath(); ctx.arc(-10, 1, 2.5, 0, Math.PI * 2); ctx.arc(10, 1, 2.5, 0, Math.PI * 2); ctx.fill();
+    const info = BOSS_TYPES[boss.bossType];
+    const cx = boss.x + boss.width / 2;
+    const cy = boss.y + boss.height / 2;
+    const hw = boss.width / 2;
+    const hh = boss.height / 2;
+
+    ctx.save(); ctx.translate(cx, cy);
+
+    // Main body
+    ctx.fillStyle = info.bodyColor; ctx.beginPath();
+    ctx.moveTo(0, hh); ctx.lineTo(-hw + 6, -hh + 6);
+    ctx.lineTo(-8, -hh + 10); ctx.lineTo(8, -hh + 10);
+    ctx.lineTo(hw - 6, -hh + 6); ctx.closePath(); ctx.fill();
+
+    // Wing accents
+    ctx.fillStyle = info.accentColor;
+    ctx.beginPath();
+    ctx.moveTo(-hw + 10, -4); ctx.lineTo(-hw - 4, hh - 6); ctx.lineTo(-hw / 2, 4); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(hw - 10, -4); ctx.lineTo(hw + 4, hh - 6); ctx.lineTo(hw / 2, 4); ctx.closePath(); ctx.fill();
+
+    // Cockpit
+    ctx.fillStyle = info.cockpitColor; ctx.beginPath();
+    ctx.arc(0, 4 + boss.height * 0.04, boss.width * 0.11, 0, Math.PI * 2); ctx.fill();
+
+    // Eyes / gun ports
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(-hw * 0.28, -hh * 0.1, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hw * 0.28, -hh * 0.1, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000000';
+    ctx.beginPath(); ctx.arc(-hw * 0.28, -hh * 0.1, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hw * 0.28, -hh * 0.1, 2, 0, Math.PI * 2); ctx.fill();
+
+    // Engine glow
+    ctx.fillStyle = '#ffaa00';
+    ctx.beginPath(); ctx.moveTo(-6, hh); ctx.lineTo(0, hh + 8 + Math.sin(performance.now() * 0.01) * 3); ctx.lineTo(6, hh); ctx.closePath(); ctx.fill();
+
     ctx.restore();
-    const barW = boss.width + 10, barH = 6, barX = boss.x - 5, barY = boss.y - 16, hpPct = boss.hp / boss.hpMax;
+
+    // HP bar
+    const barW = boss.width + 10, barH = 7, barX = boss.x - 5, barY = boss.y - 18, hpPct = boss.hp / boss.hpMax;
     ctx.fillStyle = '#333333'; ctx.fillRect(barX, barY, barW, barH);
     ctx.fillStyle = hpPct > 0.3 ? '#00ff00' : '#ff0000'; ctx.fillRect(barX, barY, barW * hpPct, barH);
-    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.strokeRect(barX, barY, barW, barH);
-    ctx.fillStyle = '#ffffff'; ctx.font = '10px Arial'; ctx.textAlign = 'center';
-    ctx.fillText('BOSS', boss.x + boss.width / 2, barY - 4);
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.strokeRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 11px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(info.name, cx, barY - 5);
 }
 
 // === Difficulty scaling ===
@@ -780,6 +900,15 @@ function update(timestamp) {
             bullets.splice(i, 1);
     }
 
+    // Move boss bullets
+    for (let i = bossBullets.length - 1; i >= 0; i--) {
+        const bb = bossBullets[i];
+        bb.x += bb.vx * dt;
+        bb.y += bb.vy * dt;
+        if (bb.y > CANVAS_H + 10 || bb.y < -10 || bb.x < -10 || bb.x > CANVAS_W + 10)
+            bossBullets.splice(i, 1);
+    }
+
     // Spawn enemies (suppressed during boss warning, slowed during boss fight and post-boss grace period)
     const spawnThrottle = (boss || bossDefeatCooldown > 0) ? 3 : 1;
     if (!bossWarningText && timestamp - lastSpawnTime >= spawnInterval * spawnThrottle) {
@@ -805,7 +934,7 @@ function update(timestamp) {
         if (powerups[i].y > CANVAS_H) powerups.splice(i, 1);
     }
 
-    updateBoss(dt);
+    updateBoss(dt, timestamp);
 
     // Bullet collisions
     for (let b = bullets.length - 1; b >= 0; b--) {
@@ -823,7 +952,7 @@ function update(timestamp) {
                 playBossExplosionSound();
                 score += 500 * Math.floor(difficultyLevel / 3);
                 bossDefeatCooldown = 5000;
-                boss = null; bossSpawnedThisLevel = true;
+                boss = null; bossSpawnedThisLevel = true; bossBullets = [];
                 updateDifficulty();
             }
             scoreDisplay.textContent = 'Score: ' + score + ' | Lv ' + difficultyLevel + (extraLives > 0 ? ' | ' + extraLives + 'UP' : '');
@@ -882,6 +1011,23 @@ function update(timestamp) {
                 spawnExplosion(player.x + player.width / 2, player.y + player.height / 2, '#00d4ff', 15, 5);
                 spawnSparkBurst(player.x + player.width / 2, player.y + player.height / 2, '#ffffff');
                 triggerShake(10, 500);
+                playGameOverSound(); endGame(); return;
+            }
+        }
+        // Boss bullets vs player
+        for (let i = bossBullets.length - 1; i >= 0; i--) {
+            const bb = bossBullets[i];
+            if (checkCollision(player, { x: bb.x - bb.size, y: bb.y - bb.size, width: bb.size * 2, height: bb.size * 2 })) {
+                bossBullets.splice(i, 1);
+                if (extraLives > 0) {
+                    extraLives--;
+                    spawnSparkBurst(bb.x, bb.y, '#ff4444');
+                    scoreDisplay.textContent = 'Score: ' + score + ' | Lv ' + difficultyLevel + (extraLives > 0 ? ' | ' + extraLives + 'UP' : '');
+                    playPowerUpSound();
+                    return;
+                }
+                spawnExplosion(player.x + player.width / 2, player.y + player.height / 2, '#ff4444', 10, 4);
+                triggerShake(6, 300);
                 playGameOverSound(); endGame(); return;
             }
         }
@@ -944,6 +1090,21 @@ function draw() {
     ctx.fillStyle = spreadShotTimer > 0 ? '#44ff44' : rapidFireTimer > 0 ? '#ffcc00' : '#ffff00';
     for (let i = 0; i < bullets.length; i++) {
         ctx.fillRect(bullets[i].x, bullets[i].y, bullets[i].width, bullets[i].height);
+    }
+
+    // Boss bullets
+    for (let i = 0; i < bossBullets.length; i++) {
+        const bb = bossBullets[i];
+        // Outer glow
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = bb.color;
+        ctx.beginPath(); ctx.arc(bb.x, bb.y, bb.size * 1.6, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1.0;
+        // Core with radial gradient
+        const grad = ctx.createRadialGradient(bb.x, bb.y, 0, bb.x, bb.y, bb.size);
+        grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.35, bb.color); grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(bb.x, bb.y, bb.size, 0, Math.PI * 2); ctx.fill();
     }
 
     // Enemies
@@ -1066,7 +1227,7 @@ function startGame() {
     initEvents();
     shakeAmount = 0; shakeDuration = 0;
     running = true; gameOver = false; score = 0;
-    bullets = []; enemies = []; particles = []; powerups = [];
+    bullets = []; bossBullets = []; enemies = []; particles = []; powerups = [];
     boss = null; bossSpawnedThisLevel = false; bossWarningTimer = 0; bossWarningText = ''; bossDefeatCooldown = 0;
     shieldTimer = 0; rapidFireTimer = 0; spreadShotTimer = 0;
     speedBoostTimer = 0; doubleDamageTimer = 0; iceFreezeTimer = 0; extraLives = 0;
