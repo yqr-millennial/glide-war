@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glide War</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="480" height="720"></canvas>
+        <div id="scoreDisplay">Score: 0</div>
+        <div id="startScreen">
+            <h1>Glide War</h1>
+            <p class="instructions">Arrow keys to move<br>Spacebar to fire</p>
+            <button id="startBtn">Start Game</button>
+        </div>
+        <div id="gameOver">
+            <h1>Game Over</h1>
+            <p class="finalScore">Score: <span id="finalScore">0</span></p>
+            <button id="restartBtn">Play Again</button>
+        </div>
+    </div>
+    <script src="js/game.js"></script>
+</body>
+</html>
